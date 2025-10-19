@@ -452,12 +452,12 @@ def handle_new_message2(data):
 
 @socketio.on('finishedRating')
 def handle1_points(data):
-    user_id = session.get('user_id')
-    user_status = session.get('user_status')
     room_id = data['room_id']
+
     if room_id in result_processing and result_processing[room_id]:
         return
     result_processing[room_id] = True
+    connect = None
     try:
         p1_id = data['p1_id']
         p2_id = data['p2_id']
@@ -497,77 +497,39 @@ def handle1_points(data):
         p1sumPoint = p1Scores.get('lp') + p1Scores.get('rp') + p1Scores.get('ap')
         p2sumPoint = p2Scores.get('lp') + p2Scores.get('rp') + p2Scores.get('ap')
         if p1sumPoint > p2sumPoint:
-            win_id = p1_id
-            lose_id = p2_id
+            win_id, lose_id = p1_id, p2_id
             p1_rate, p2_rate = simple_elo_rate_1vs1(p1_rate, p2_rate)
         elif p1sumPoint < p2sumPoint:
-            win_id = p2_id
-            lose_id = p1_id
+            win_id, lose_id = p2_id, p1_id
             p2_rate, p1_rate = simple_elo_rate_1vs1(p2_rate, p1_rate)
         elif p1sumPoint == p2sumPoint:
-            win_id = 'draw'
-            lose_id = 'draw'
-            p1_rate = p1_rate
-            p2_rate = p2_rate
+            win_id, lose_id = 'draw', 'draw'
+            p1_rate, p2_rate = p1_rate, p2_rate
+        print(p1_rate, p2_rate)
         connect = sqlite3.connect("resbattler.db")
         cursor = connect.cursor()
-        if p1sumPoint > p2sumPoint:
-            win_id = p1_id
-            lose_id = p2_id
-            if user_id == win_id:
-                cursor.execute("SELECT wincnt FROM users WHERE id = ?", (user_id,))
-                user_wincnt = cursor.fetchone()[0]
-                cursor.execute("UPDATE users SET rate = ? WHERE id = ?", (f'{p1_rate}', f'{user_id}'))
-                cursor.execute("UPDATE users SET wincnt = ? WHERE id = ?", (f'{int(user_wincnt) + 1}', f'{user_id}'))
-                update_ranking_data(p1_id, p1_name, p1_rate)
-            elif user_id == lose_id:
-                cursor.execute("SELECT losecnt FROM users WHERE id = ?", (user_id,))
-                user_losecnt = cursor.fetchone()[0]
-                cursor.execute("UPDATE users SET rate = ? WHERE id = ?", (f'{p2_rate}', f'{user_id}'))
-                cursor.execute("UPDATE users SET losecnt = ? WHERE id = ?", (f'{int(user_losecnt) + 1}', f'{user_id}'))
-                update_ranking_data(p2_id, p2_name, p2_rate)
-        elif p1sumPoint < p2sumPoint:
-            win_id = p2_id
-            lose_id = p1_id
-            if user_id == win_id:
-                cursor.execute("SELECT wincnt FROM users WHERE id = ?", (user_id,))
-                user_wincnt = cursor.fetchone()[0]
-                cursor.execute("UPDATE users SET rate = ? WHERE id = ?", (f'{p2_rate}', f'{user_id}'))
-                cursor.execute("UPDATE users SET wincnt = ? WHERE id = ?", (f'{int(user_wincnt) + 1}', f'{user_id}'))
-                update_ranking_data(p2_id, p2_name, p2_rate)
-            elif user_id == lose_id:
-                cursor.execute("SELECT losecnt FROM users WHERE id = ?", (user_id,))
-                user_losecnt = cursor.fetchone()[0]
-                cursor.execute("UPDATE users SET rate = ? WHERE id = ?", (f'{p1_rate}', f'{user_id}'))
-                cursor.execute("UPDATE users SET losecnt = ? WHERE id = ?", (f'{int(user_losecnt) + 1}', f'{user_id}'))
-                update_ranking_data(p1_id, p1_name, p1_rate)
-        elif p1sumPoint == p2sumPoint:
-            if user_id == p1_id:
-                cursor.execute("SELECT drawcnt FROM users WHERE id = ?", (user_id,))
-                user_drawcnt = cursor.fetchone()[0]
-                cursor.execute("UPDATE users SET rate = ? WHERE id = ?", (f'{p1_rate}', f'{user_id}'))
-                cursor.execute("UPDATE users SET drawcnt = ? WHERE id = ?", (f'{int(user_drawcnt) + 1}', f'{user_id}'))
-                update_ranking_data(p1_id, p1_name, p1_rate)
-            elif user_id == p2_id:
-                cursor.execute("SELECT drawcnt FROM users WHERE id = ?", (user_id,))
-                user_drawcnt = cursor.fetchone()[0]
-                cursor.execute("UPDATE users SET rate = ? WHERE id = ?", (f'{p2_rate}', f'{user_id}'))
-                cursor.execute("UPDATE users SET drawcnt = ? WHERE id = ?", (f'{int(user_drawcnt) + 1}', f'{user_id}'))
-                update_ranking_data(p2_id, p2_name, p2_rate)
+        update_user_stats(cursor, p1_id, p1_rate, win_id, lose_id, p1_id)
+        update_ranking_data(p1_id, p1_name, p1_rate)
+        update_user_stats(cursor, p2_id, p2_rate, win_id, lose_id, p2_id)
+        update_ranking_data(p2_id, p2_name, p2_rate)
         connect.commit()
-        connect.close()
-        if user_id and user_status == 'inrp':
-            socketio.emit('displayRatingResult', {
-                'p1Scores': p1Scores,
-                'p2Scores': p2Scores,
-                'win_id': win_id,
-                'lose_id': lose_id,
-                'p1_name' : p1_name,
-                'p2_name' : p2_name,
-                'p1_rate': p1_rate,
-                'p2_rate': p2_rate,
-            }, to=room_id)
+        socketio.emit('displayRatingResult', {
+            'p1Scores': p1Scores,
+            'p2Scores': p2Scores,
+            'win_id': win_id,
+            'lose_id': lose_id,
+            'p1_name' : p1_name,
+            'p2_name' : p2_name,
+            'p1_rate': p1_rate,
+            'p2_rate': p2_rate,
+        }, to=room_id)
+    except Exception as e:
+        print(f"Error in handle_points: {e}")
+        if connect:
+            connect.rollback()
     finally:
+        if connect:
+            connect.close()
         session["chat_history"] = []
         socketio.start_background_task(lambda: reset_processing_flag(room_id))
 
@@ -652,18 +614,37 @@ def simple_elo_rate_1vs1(r1, r2):
     new_r2 = int(new_r2)
     return new_r1, new_r2
 
+def update_user_stats(cursor, user_id, new_rate, win_id, lose_id, player_id):
+    print(user_id, new_rate, win_id, lose_id, player_id)
+    cursor.execute("UPDATE users SET rate = ? WHERE id = ?", (new_rate, user_id))
+    if win_id == player_id:
+        cursor.execute(
+            "UPDATE users SET wincnt = wincnt + 1 WHERE id = ?", 
+            (user_id,)
+        )
+    elif lose_id == player_id:
+        cursor.execute(
+            "UPDATE users SET losecnt = losecnt + 1 WHERE id = ?", 
+            (user_id,)
+        )
+    elif win_id == 'draw':
+        cursor.execute(
+            "UPDATE users SET drawcnt = drawcnt + 1 WHERE id = ?", 
+            (user_id,)
+        )
+
 def update_ranking_data(user_id, user_name, user_rate):
     if lock.acquire(timeout=5):
         try:
             ranking_data = f'{user_id}:{user_name}:{user_rate}'
-            if ranking_data and user_id in [d.decode().split(':')[0] for d in r.lrange(RANKING_DATA, 0, -1)]:
-                r.lrem(RANKING_DATA, 0, [d for d in r.lrange(RANKING_DATA, 0, -1) if d.decode().startswith(user_id)][0])
-            if ranking_data and user_id not in [d.decode().split(':')[0] for d in r.lrange(RANKING_DATA, 0, -1)]:
-                r.rpush(RANKING_DATA, ranking_data)
+            ranking_list = r.lrange(RANKING_DATA, 0, -1)
+            for i, entry in enumerate(ranking_list):
+                if entry.decode().startswith(f'{user_id}:'):
+                    r.lset(RANKING_DATA, i, ranking_data)
+                    return
+            r.rpush(RANKING_DATA, ranking_data)
         finally:
             lock.release()
-    else:
-        return
 
 @socketio.on('getRankingData')
 def handle_getRankingData():
