@@ -13,7 +13,10 @@ import sys
 import time
 import uuid
 import random
+import json
+from dotenv import load_dotenv
 
+import openai
 import sqlite3
 import redis
 
@@ -21,6 +24,9 @@ from flask_session import Session
 from flask_cors import CORS
 
 r = redis.Redis(host='127.0.0.1', port=6379, db=10)
+
+load_dotenv()
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = Flask(__name__, 
             template_folder='templates', 
@@ -43,6 +49,8 @@ UNRATE_ROOM = "unrate_battlers_room"
 USER_SIDS = "user_sids"
 USER_RATES = "user_rates"
 RANKING_DATA = "ranking_data"
+
+room_chats = {}
 
 def make_db():
     connect = sqlite3.connect("resbattler.db")
@@ -235,6 +243,7 @@ def matchRatingBattle(player1, player2):
                 socketio.server.enter_room(player1_sid, room_id)
                 socketio.server.enter_room(player2_sid, room_id)
                 theme = generate_theme()
+                room_chats[room_id] = [{"テーマ": theme}]
                 socketio.emit('r_game_ready', {
                     'player1': player1.decode(), 
                     'player2': player2.decode(), 
@@ -269,6 +278,7 @@ def matchUnrateBattle(playerA, playerB):
                 socketio.server.enter_room(playerA_sid, room_id)
                 socketio.server.enter_room(playerB_sid, room_id)
                 theme = generate_theme()
+                room_chats[room_id] = [{"テーマ": theme}]
                 socketio.emit('u_game_ready', {
                     'playerA': playerA.decode(),
                     'playerB': playerB.decode(),
@@ -424,6 +434,7 @@ def on_leave(data):
 def handle_new_message1(data):
     text1 = data['text']
     room_id = data['room_id']
+    room_chats[room_id].append({"role": "player1", "content": text1})
     socketio.emit('player1_message', {
         'data': text1,
         'room_id': room_id,
@@ -433,6 +444,7 @@ def handle_new_message1(data):
 def handle_new_message2(data):
     text2 = data['text']
     room_id = data['room_id']
+    room_chats[room_id].append({"role": "player2", "content": text2})
     socketio.emit('player2_message', {
         'data': text2,
         'room_id': room_id,
@@ -446,7 +458,6 @@ def handle1_points(data):
     if room_id in result_processing and result_processing[room_id]:
         return
     result_processing[room_id] = True
-    
     try:
         p1_id = data['p1_id']
         p2_id = data['p2_id']
@@ -455,9 +466,34 @@ def handle1_points(data):
         p1_rate = data['p1_rate']
         p2_rate = data['p2_rate']
         room_id = data['room_id']
+        chat_history = room_chats[room_id]
         # ここにAIの判定
-        p1Scores = {'lp': 0, 'rp': 0, 'ap': 0}
-        p2Scores = {'lp': 0, 'rp': 0, 'ap': 0}
+        messages=[{"role": "system", "content": """
+            あなたは与えられたレスバトルの採点を行うアシスタントです。
+            次の質問には**必ず有効なJSON形式のみ**で回答してください。
+            ※絶対に日本語の説明文やコメントを入れないでください。
+            ※すべてのキーと文字列は必ずダブルクオート " で囲んでください。
+            ※点数は必ず0~10点でつけてください。
+            【出力フォーマット】：
+                [
+                    {"player1": {"lp": 数値, "rp": 数値, "ap": 数値}},
+                    {"player2": {"lp": 数値, "rp": 数値, "ap": 数値}}
+                ]
+            """},
+            {"role": "user", "content": [
+                {"type": "text", "text": data.get("content", f'{chat_history}')}
+            ]}
+        ]
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=100,
+            temperature=0.7
+        )
+        response_text = response.choices[0].message.content
+        response_data = json.loads(response_text)
+        p1Scores = response_data[0]["player1"]
+        p2Scores = response_data[1]["player2"]
         p1sumPoint = p1Scores.get('lp') + p1Scores.get('rp') + p1Scores.get('ap')
         p2sumPoint = p2Scores.get('lp') + p2Scores.get('rp') + p2Scores.get('ap')
         if p1sumPoint > p2sumPoint:
@@ -471,8 +507,8 @@ def handle1_points(data):
         elif p1sumPoint == p2sumPoint:
             win_id = 'draw'
             lose_id = 'draw'
-            p1_rate = float(p1_rate)
-            p2_rate = float(p2_rate)
+            p1_rate = p1_rate
+            p2_rate = p2_rate
         connect = sqlite3.connect("resbattler.db")
         cursor = connect.cursor()
         if p1sumPoint > p2sumPoint:
@@ -532,6 +568,7 @@ def handle1_points(data):
                 'p2_rate': p2_rate,
             }, to=room_id)
     finally:
+        session["chat_history"] = []
         socketio.start_background_task(lambda: reset_processing_flag(room_id))
 
 @socketio.on('finishedUnrate')
@@ -542,16 +579,40 @@ def handle2_points(data):
     if room_id in result_processing and result_processing[room_id]:
         return
     result_processing[room_id] = True
-    
     try:
         p1_id = data['p1_id']
         p2_id = data['p2_id']
         p1_name = data['p1_name']
         p2_name = data['p2_name']
         room_id = data['room_id']
+        chat_history = room_chats[room_id]
         # ここにAIの判定
-        p1Scores = {'lp': 0, 'rp': 0, 'ap': 0}
-        p2Scores = {'lp': 0, 'rp': 0, 'ap': 0}
+        messages=[{"role": "system", "content": """
+            あなたは与えられたレスバトルの採点を行うアシスタントです。
+            次の質問には**必ず有効なJSON形式のみ**で回答してください。
+            ※絶対に日本語の説明文やコメントを入れないでください。
+            ※すべてのキーと文字列は必ずダブルクオート " で囲んでください。
+            ※点数は必ず0~10点でつけてください。
+            【出力フォーマット】：
+                [
+                    {"player1": {"lp": 数値, "rp": 数値, "ap": 数値}},
+                    {"player2": {"lp": 数値, "rp": 数値, "ap": 数値}}
+                ]
+            """},
+            {"role": "user", "content": [
+                {"type": "text", "text": data.get("content", f'{chat_history}')}
+            ]}
+        ]
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=100,
+            temperature=0.7
+        )
+        response_text = response.choices[0].message.content
+        response_data = json.loads(response_text)
+        p1Scores = response_data[0]["player1"]
+        p2Scores = response_data[1]["player2"]
         p1sumPoint = p1Scores.get('lp') + p1Scores.get('rp') + p1Scores.get('ap')
         p2sumPoint = p2Scores.get('lp') + p2Scores.get('rp') + p2Scores.get('ap')
         if p1sumPoint > p2sumPoint:
@@ -573,6 +634,7 @@ def handle2_points(data):
                 'p2_name' : p2_name,
             }, to=room_id)
     finally:
+        session["chat_history"] = []
         socketio.start_background_task(lambda: reset_processing_flag(room_id))
 
 def reset_processing_flag(room_id):
